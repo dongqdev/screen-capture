@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Virtual environment
+.venv/
+venv/
+
+# Python caches and tooling
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Editor/OS
+.vscode/
