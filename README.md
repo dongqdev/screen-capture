@@ -1,22 +1,59 @@
-# Window Capture Tool (Python)
+# 화면 캡처 도구 (Python)
 
-A simple desktop app for automated window capture with post-capture key action.
+선택한 창을 자동 캡처하고, 캡처 후 키보드 동작까지 실행할 수 있는 데스크톱 앱입니다.
 
-## Features
+## 주요 기능
 
-- Select target window
-- Set delay time (seconds)
-- Select post-capture action (`None`, `Right Arrow`, `Down Arrow`, `Page Down`)
-- Start/Stop capture loop
-- Capture once manually
-- Choose output folder
+- 캡처 대상 창 선택 및 새로고침
+- 딜레이(초) 선택
+- 캡처 후 동작 선택 (`없음`, `오른쪽 화살표`, `아래쪽 화살표`, `Page Down`)
+- 페이지 모드 선택 (`단면(1페이지)` / `양면(2페이지)`)
+- 총 페이지 입력
+- 계산된 총 캡처 횟수 표시
+- 예상시간(최소/평균/최대) 표시
+- 반복 캡처 시작/정지
+- 1회 수동 캡처
+- 로그 지우기
+- 저장 폴더 선택
 
-## Requirements
+## 창 캡처 사용법
+
+- `창 선택`에서 대상 창을 고릅니다.
+- 목록에 보이지 않으면 `새로고침`을 누릅니다.
+- 시작/정지로 반복 캡처를 제어합니다.
+- 캡처 후 동작이 `없음`이 아니면, 앱이 먼저 대상 창을 자동 활성화한 뒤 키 입력을 보냅니다.
+
+## 페이지/횟수 계산 규칙
+
+- 단면: 캡처 1회당 1페이지 처리
+- 양면: 캡처 1회당 2페이지 처리
+- 총 캡처 횟수 = `ceil(총 페이지 / 캡처당 페이지 수)`
+- 예:
+	- 총 페이지 `2`, 양면 -> `1회`
+	- 총 페이지 `3`, 양면 -> `2회`
+	- 총 페이지 `4`, 양면 -> `2회`
+- 시작 시 계산된 목표 횟수에 도달하면 자동으로 정지합니다.
+
+## 딜레이 동작 규칙
+
+- 선택한 딜레이가 `N`이면, 실제 대기 시간은 `N-1.0초 ~ N+1.0초` 구간에서 매번 랜덤으로 선택됩니다.
+- 구간 랜덤이므로 밀리초가 포함됩니다.
+- 예: `4`를 선택하면 `3.000초 ~ 5.000초` 사이에서 랜덤 (예: `3.1초`, `4.223초`, `5.0초`)
+
+## 예상시간 계산 방식
+
+- 총 캡처 횟수를 `K`라고 할 때, 실제 대기는 캡처 사이의 `K-1`번 발생합니다.
+- 최소 예상시간: `(K-1) * (N-1.0)`
+- 평균 예상시간: `(K-1) * N`
+- 최대 예상시간: `(K-1) * (N+1.0)`
+- 실제 환경(창 활성화, OS 반응)에 따라 약간의 오차가 있을 수 있습니다.
+
+## 요구 사항
 
 - Python 3.10+
 - macOS or Windows
 
-## Install
+## 설치
 
 ```bash
 python3 -m venv .venv
@@ -25,30 +62,33 @@ python -m pip install -U pip
 python -m pip install -r requirements.txt
 ```
 
-## Run
+## 실행
 
 ```bash
 source .venv/bin/activate
 python main.py
 ```
 
-or
+또는
 
 ```bash
 source .venv/bin/activate
 python screen_capture_app.py
 ```
 
-## Notes for macOS
+## macOS 권한 안내
 
-You may need to grant permissions in System Settings:
+macOS에서는 아래 권한을 허용해야 정상 동작합니다.
 
-- Privacy & Security > Screen Recording
-- Privacy & Security > Accessibility
+- 개인 정보 보호 및 보안 > 화면 기록
+- 개인 정보 보호 및 보안 > 손쉬운 사용
 
-Without these permissions, screenshot capture or key presses may fail.
+권한이 없으면 화면 캡처 또는 키 입력 동작이 실패할 수 있습니다.
 
-If you see `ModuleNotFoundError: No module named '_tkinter'` on Homebrew Python:
+특히 캡처 후 동작(키 입력)을 안정적으로 사용하려면 대상 앱 활성화가 필요합니다.
+macOS에서 자동 활성화가 잘 안 되면 손쉬운 사용 권한이 부여되어 있는지 확인하세요.
+
+Homebrew Python에서 `ModuleNotFoundError: No module named '_tkinter'`가 발생하면 아래를 실행하세요.
 
 ```bash
 brew install python-tk@3.14
