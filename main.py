@@ -238,6 +238,7 @@ class CaptureApp:
         self.page_mode_var = tk.StringVar(value="양면(2페이지)")
         self.total_pages_var = tk.StringVar(value="1")
         self.top_crop_var = tk.StringVar(value="30")
+        self.bottom_crop_var = tk.StringVar(value="55")
         self.folder_var = tk.StringVar(value=str(Path.home() / "captures"))
         self.plan_count_var = tk.StringVar(value="총 캡처 횟수: -")
         self.estimate_var = tk.StringVar(value="예상시간(최소/평균/최대): -")
@@ -313,8 +314,14 @@ class CaptureApp:
             row=9, column=2, sticky="w", pady=5
         )
 
+        ttk.Label(frame, text="하단 제외(px)").grid(row=10, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.bottom_crop_var).grid(row=10, column=1, sticky="ew", pady=5)
+        ttk.Label(frame, text="작업표시줄이 같이 찍히면 40~80 정도부터 조정").grid(
+            row=10, column=2, sticky="w", pady=5
+        )
+
         controls = ttk.Frame(frame)
-        controls.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(10, 6))
+        controls.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(10, 6))
         ttk.Button(controls, text="시작", command=self.start_capture).pack(side="left")
         ttk.Button(controls, text="정지", command=self.stop_capture).pack(side="left", padx=8)
         ttk.Button(controls, text="1회 캡처", command=self.capture_once).pack(side="left")
@@ -324,7 +331,7 @@ class CaptureApp:
         self.crop_pdf_button = ttk.Button(controls, text="PDF 상단 자르기", command=self.crop_existing_pdf_top)
         self.crop_pdf_button.pack(side="left", padx=(8, 0))
 
-        ttk.Label(frame, textvariable=self.status_var).grid(row=11, column=0, columnspan=3, sticky="w", pady=6)
+        ttk.Label(frame, textvariable=self.status_var).grid(row=12, column=0, columnspan=3, sticky="w", pady=6)
 
         self.pdf_progress = ttk.Progressbar(
             frame,
@@ -332,11 +339,11 @@ class CaptureApp:
             variable=self.pdf_progress_var,
             maximum=100,
         )
-        self.pdf_progress.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        self.pdf_progress.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(0, 6))
 
         self.log_box = tk.Text(frame, height=14, state="disabled")
-        self.log_box.grid(row=13, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
-        frame.rowconfigure(13, weight=1)
+        self.log_box.grid(row=14, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        frame.rowconfigure(14, weight=1)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -377,6 +384,17 @@ class CaptureApp:
 
         if value < 0:
             raise ValueError("상단 제외(px)는 0 이상이어야 합니다.")
+
+        return value
+
+    def _bottom_crop_pixels(self):
+        try:
+            value = int(self.bottom_crop_var.get().strip())
+        except ValueError as exc:
+            raise ValueError("하단 제외(px)는 0 이상의 정수로 입력해 주세요.") from exc
+
+        if value < 0:
+            raise ValueError("하단 제외(px)는 0 이상이어야 합니다.")
 
         return value
 
@@ -678,6 +696,7 @@ class CaptureApp:
             raise ValueError("먼저 캡처할 창을 선택해 주세요.")
 
         self._top_crop_pixels()
+        self._bottom_crop_pixels()
 
         try:
             delay = int(self.delay_var.get().strip())
@@ -742,14 +761,15 @@ class CaptureApp:
             raise RuntimeError("대상 창 크기가 올바르지 않습니다.")
 
         top_crop = self._top_crop_pixels()
-        if top_crop >= w.height:
-            raise RuntimeError("상단 제외(px)가 창 높이보다 크거나 같습니다.")
+        bottom_crop = self._bottom_crop_pixels()
+        if top_crop + bottom_crop >= w.height:
+            raise RuntimeError("상/하단 제외(px) 합이 창 높이보다 크거나 같습니다.")
 
         monitor = {
             "left": w.left,
             "top": w.top + top_crop,
             "width": w.width,
-            "height": w.height - top_crop,
+            "height": w.height - top_crop - bottom_crop,
         }
 
         with mss.mss() as sct:
