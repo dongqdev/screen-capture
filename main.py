@@ -1,8 +1,11 @@
 import math
+import importlib
 import random
+import re
 import sys
 import time
 import threading
+import ctypes
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +42,27 @@ class WindowProvider:
             if window.wid == wid:
                 return window
         return None
+
+    def get_capture_bounds(self, wid):
+        window = self.get_window_bounds(wid)
+        if not window:
+            return None
+
+        if sys.platform.startswith("win"):
+            client_bounds = self._get_capture_bounds_windows(wid)
+            if client_bounds:
+                return WindowInfo(
+                    wid=window.wid,
+                    title=window.title,
+                    left=client_bounds.left,
+                    top=client_bounds.top,
+                    width=client_bounds.width,
+                    height=client_bounds.height,
+                    owner=window.owner,
+                    pid=window.pid,
+                )
+
+        return window
 
     def activate_window(self, wid):
         if sys.platform == "darwin":
@@ -163,6 +187,35 @@ class WindowProvider:
                 return False
         return False
 
+    @staticmethod
+    def _get_capture_bounds_windows(wid):
+        try:
+            from ctypes import wintypes
+        except Exception:
+            return None
+
+        user32 = ctypes.windll.user32
+        rect = wintypes.RECT()
+        if not user32.GetClientRect(wid, ctypes.byref(rect)):
+            return None
+
+        top_left = wintypes.POINT(0, 0)
+        bottom_right = wintypes.POINT(rect.right, rect.bottom)
+        if not user32.ClientToScreen(wid, ctypes.byref(top_left)):
+            return None
+        if not user32.ClientToScreen(wid, ctypes.byref(bottom_right)):
+            return None
+
+        left = int(top_left.x)
+        top = int(top_left.y)
+        width = int(bottom_right.x - top_left.x)
+        height = int(bottom_right.y - top_left.y)
+
+        if width <= 0 or height <= 0:
+            return None
+
+        return WindowInfo(wid=wid, title="", left=left, top=top, width=width, height=height)
+
 
 class CaptureApp:
     def __init__(self, root):
@@ -176,6 +229,8 @@ class CaptureApp:
         self.running = threading.Event()
         self.capture_thread = None
         self.capture_index = 0
+        self.pdf_running = threading.Event()
+        self.pdf_thread = None
 
         self.window_var = tk.StringVar()
         self.delay_var = tk.StringVar(value="2")
@@ -186,6 +241,7 @@ class CaptureApp:
         self.plan_count_var = tk.StringVar(value="총 캡처 횟수: -")
         self.estimate_var = tk.StringVar(value="예상시간(최소/평균/최대): -")
         self.status_var = tk.StringVar(value="대기 중")
+        self.pdf_progress_var = tk.DoubleVar(value=0.0)
 
         self._build_ui()
         self.refresh_windows()
@@ -256,12 +312,22 @@ class CaptureApp:
         ttk.Button(controls, text="정지", command=self.stop_capture).pack(side="left", padx=8)
         ttk.Button(controls, text="1회 캡처", command=self.capture_once).pack(side="left")
         ttk.Button(controls, text="로그 지우기", command=self.clear_log).pack(side="left", padx=8)
+        self.pdf_button = ttk.Button(controls, text="PDF 만들기", command=self.export_folder_to_pdf)
+        self.pdf_button.pack(side="left")
 
         ttk.Label(frame, textvariable=self.status_var).grid(row=10, column=0, columnspan=3, sticky="w", pady=6)
 
+        self.pdf_progress = ttk.Progressbar(
+            frame,
+            mode="determinate",
+            variable=self.pdf_progress_var,
+            maximum=100,
+        )
+        self.pdf_progress.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+
         self.log_box = tk.Text(frame, height=14, state="disabled")
-        self.log_box.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
-        frame.rowconfigure(11, weight=1)
+        self.log_box.grid(row=12, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        frame.rowconfigure(12, weight=1)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -283,6 +349,127 @@ class CaptureApp:
         folder = filedialog.askdirectory(initialdir=self.folder_var.get() or str(Path.home()))
         if folder:
             self.folder_var.set(folder)
+
+    @staticmethod
+    def _natural_sort_key(path_obj):
+        return [int(chunk) if chunk.isdigit() else chunk for chunk in re.split(r"(\d+)", path_obj.name.casefold())]
+
+    def _collect_image_files(self, folder):
+        image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+        files = [path_obj for path_obj in folder.iterdir() if path_obj.is_file() and path_obj.suffix.lower() in image_exts]
+        files.sort(key=self._natural_sort_key)
+        return files
+
+    def _post_ui(self, callback):
+        try:
+            self.root.after(0, callback)
+        except RuntimeError:
+            pass
+
+    def _set_pdf_controls_running(self, running, total_count=100):
+        if running:
+            self.pdf_button.configure(state="disabled")
+            self.pdf_progress.configure(maximum=max(1, total_count))
+            self.pdf_progress_var.set(0)
+            return
+
+        self.pdf_button.configure(state="normal")
+        self.pdf_progress.configure(maximum=100)
+
+    def _update_pdf_progress(self, done, total):
+        self.pdf_progress.configure(maximum=max(1, total))
+        self.pdf_progress_var.set(done)
+        percent = (done / total) * 100 if total else 0
+        self.status_var.set(f"PDF 생성 중: {done}/{total} ({percent:.1f}%)")
+
+    def _create_pdf_with_progress(self, image_files, output_path):
+        try:
+            from PIL import Image
+            image_reader_module = importlib.import_module("reportlab.lib.utils")
+            pdf_canvas_module = importlib.import_module("reportlab.pdfgen.canvas")
+            ImageReader = image_reader_module.ImageReader
+            Canvas = pdf_canvas_module.Canvas
+        except Exception:
+            self._post_ui(
+                lambda: messagebox.showerror(
+                    "PDF 생성 실패",
+                    "Pillow, reportlab 패키지가 필요합니다.\n`pip install -r requirements.txt`를 실행해 주세요.",
+                )
+            )
+            self._post_ui(lambda: self.status_var.set("PDF 생성 실패"))
+            self._post_ui(lambda: self._set_pdf_controls_running(False))
+            self.pdf_running.clear()
+            return
+
+        total = len(image_files)
+        try:
+            pdf_canvas = Canvas(str(output_path))
+            for index, image_path in enumerate(image_files, start=1):
+                with Image.open(image_path) as img:
+                    if img.mode not in ("RGB", "L"):
+                        img = img.convert("RGB")
+                    width, height = img.size
+                    pdf_canvas.setPageSize((width, height))
+                    pdf_canvas.drawImage(
+                        ImageReader(img),
+                        0,
+                        0,
+                        width=width,
+                        height=height,
+                        preserveAspectRatio=False,
+                        mask="auto",
+                    )
+                    pdf_canvas.showPage()
+
+                self._post_ui(lambda d=index, t=total: self._update_pdf_progress(d, t))
+
+            pdf_canvas.save()
+            self._post_ui(lambda: self.status_var.set(f"PDF 생성 완료: {Path(output_path).name}"))
+            self._post_ui(lambda: self.log(f"PDF 생성 완료: {output_path} (이미지 {total}장)"))
+        except Exception as exc:
+            self._post_ui(lambda: self.status_var.set("PDF 생성 실패"))
+            self._post_ui(lambda e=exc: self.log(f"PDF 생성 오류: {e}"))
+            self._post_ui(lambda e=exc: messagebox.showerror("PDF 생성 실패", str(e)))
+        finally:
+            self.pdf_running.clear()
+            self._post_ui(lambda: self._set_pdf_controls_running(False))
+
+    def export_folder_to_pdf(self):
+        if self.pdf_running.is_set():
+            messagebox.showinfo("PDF 생성", "이미 PDF 생성이 진행 중입니다.")
+            return
+
+        folder = Path(self.folder_var.get().strip()).expanduser()
+        if not folder.exists() or not folder.is_dir():
+            messagebox.showerror("PDF 생성 실패", "유효한 이미지 폴더를 먼저 선택해 주세요.")
+            return
+
+        image_files = self._collect_image_files(folder)
+        if not image_files:
+            messagebox.showwarning("PDF 생성", "선택 폴더에 이미지 파일이 없습니다.")
+            return
+
+        default_name = f"{folder.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        output_path = filedialog.asksaveasfilename(
+            title="PDF 저장",
+            defaultextension=".pdf",
+            initialdir=str(folder),
+            initialfile=default_name,
+            filetypes=[("PDF", "*.pdf")],
+        )
+        if not output_path:
+            return
+
+        self.pdf_running.set()
+        self._set_pdf_controls_running(True, total_count=len(image_files))
+        self.status_var.set(f"PDF 생성 시작: 0/{len(image_files)}")
+        self.log(f"PDF 생성 시작: {output_path} (이미지 {len(image_files)}장)")
+        self.pdf_thread = threading.Thread(
+            target=self._create_pdf_with_progress,
+            args=(image_files, output_path),
+            daemon=True,
+        )
+        self.pdf_thread.start()
 
     def refresh_windows(self):
         try:
@@ -422,7 +609,7 @@ class CaptureApp:
             pyautogui.press("pagedown")
 
     def _capture_window(self, wid, folder):
-        w = self.provider.get_window_bounds(wid)
+        w = self.provider.get_capture_bounds(wid)
         if not w:
             raise RuntimeError("대상 창을 찾을 수 없습니다. 새로고침 후 다시 선택해 주세요.")
 
