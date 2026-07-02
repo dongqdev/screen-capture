@@ -237,7 +237,7 @@ class CaptureApp:
         self.action_var = tk.StringVar(value="없음")
         self.page_mode_var = tk.StringVar(value="양면(2페이지)")
         self.total_pages_var = tk.StringVar(value="1")
-        self.top_crop_var = tk.StringVar(value="0")
+        self.top_crop_var = tk.StringVar(value="30")
         self.folder_var = tk.StringVar(value=str(Path.home() / "captures"))
         self.plan_count_var = tk.StringVar(value="총 캡처 횟수: -")
         self.estimate_var = tk.StringVar(value="예상시간(최소/평균/최대): -")
@@ -321,6 +321,8 @@ class CaptureApp:
         ttk.Button(controls, text="로그 지우기", command=self.clear_log).pack(side="left", padx=8)
         self.pdf_button = ttk.Button(controls, text="PDF 만들기", command=self.export_folder_to_pdf)
         self.pdf_button.pack(side="left")
+        self.crop_pdf_button = ttk.Button(controls, text="PDF 상단 자르기", command=self.crop_existing_pdf_top)
+        self.crop_pdf_button.pack(side="left", padx=(8, 0))
 
         ttk.Label(frame, textvariable=self.status_var).grid(row=11, column=0, columnspan=3, sticky="w", pady=6)
 
@@ -387,11 +389,13 @@ class CaptureApp:
     def _set_pdf_controls_running(self, running, total_count=100):
         if running:
             self.pdf_button.configure(state="disabled")
+            self.crop_pdf_button.configure(state="disabled")
             self.pdf_progress.configure(maximum=max(1, total_count))
             self.pdf_progress_var.set(0)
             return
 
         self.pdf_button.configure(state="normal")
+        self.crop_pdf_button.configure(state="normal")
         self.pdf_progress.configure(maximum=100)
 
     def _update_pdf_progress(self, done, total):
@@ -485,6 +489,107 @@ class CaptureApp:
         self.pdf_thread = threading.Thread(
             target=self._create_pdf_with_progress,
             args=(image_files, output_path),
+            daemon=True,
+        )
+        self.pdf_thread.start()
+
+    def _crop_pdf_worker(self, input_path, output_path, top_crop):
+        try:
+            pypdf_module = importlib.import_module("pypdf")
+            PdfReader = pypdf_module.PdfReader
+            PdfWriter = pypdf_module.PdfWriter
+        except Exception:
+            self._post_ui(
+                lambda: messagebox.showerror(
+                    "PDF 자르기 실패",
+                    "pypdf 패키지가 필요합니다.\n`pip install -r requirements.txt`를 실행해 주세요.",
+                )
+            )
+            self._post_ui(lambda: self.status_var.set("PDF 자르기 실패"))
+            self._post_ui(lambda: self._set_pdf_controls_running(False))
+            self.pdf_running.clear()
+            return
+
+        try:
+            reader = PdfReader(str(input_path))
+            writer = PdfWriter()
+            total = len(reader.pages)
+            if total == 0:
+                raise RuntimeError("페이지가 없는 PDF입니다.")
+
+            for index, page in enumerate(reader.pages, start=1):
+                left = float(page.mediabox.left)
+                right = float(page.mediabox.right)
+                bottom = float(page.mediabox.bottom)
+                top = float(page.mediabox.top)
+                height = top - bottom
+
+                if top_crop >= height:
+                    raise RuntimeError(f"{index}페이지 높이보다 상단 제외(px)가 크거나 같습니다.")
+
+                new_top = top - top_crop
+                page.mediabox.lower_left = (left, bottom)
+                page.mediabox.upper_right = (right, new_top)
+                page.cropbox.lower_left = (left, bottom)
+                page.cropbox.upper_right = (right, new_top)
+
+                writer.add_page(page)
+                self._post_ui(lambda d=index, t=total: self._update_pdf_progress(d, t))
+
+            with open(output_path, "wb") as output_file:
+                writer.write(output_file)
+
+            self._post_ui(lambda: self.status_var.set(f"PDF 자르기 완료: {Path(output_path).name}"))
+            self._post_ui(lambda: self.log(f"PDF 자르기 완료: {output_path} (상단 제외 {top_crop}px)"))
+        except Exception as exc:
+            self._post_ui(lambda: self.status_var.set("PDF 자르기 실패"))
+            self._post_ui(lambda e=exc: self.log(f"PDF 자르기 오류: {e}"))
+            self._post_ui(lambda e=exc: messagebox.showerror("PDF 자르기 실패", str(e)))
+        finally:
+            self.pdf_running.clear()
+            self._post_ui(lambda: self._set_pdf_controls_running(False))
+
+    def crop_existing_pdf_top(self):
+        if self.pdf_running.is_set():
+            messagebox.showinfo("PDF 자르기", "다른 PDF 작업이 진행 중입니다.")
+            return
+
+        try:
+            top_crop = self._top_crop_pixels()
+        except Exception as exc:
+            messagebox.showerror("PDF 자르기 실패", str(exc))
+            return
+
+        if top_crop <= 0:
+            messagebox.showwarning("PDF 자르기", "상단 제외(px)를 1 이상으로 입력해 주세요.")
+            return
+
+        input_path = filedialog.askopenfilename(
+            title="자를 PDF 선택",
+            filetypes=[("PDF", "*.pdf")],
+        )
+        if not input_path:
+            return
+
+        source = Path(input_path)
+        output_path = filedialog.asksaveasfilename(
+            title="자른 PDF 저장",
+            defaultextension=".pdf",
+            initialdir=str(source.parent),
+            initialfile=f"{source.stem}_cropped.pdf",
+            filetypes=[("PDF", "*.pdf")],
+        )
+        if not output_path:
+            return
+
+        self.pdf_running.set()
+        self._set_pdf_controls_running(True)
+        self.status_var.set("PDF 자르기 시작: 0/?")
+        self.log(f"PDF 자르기 시작: {input_path} -> {output_path} (상단 제외 {top_crop}px)")
+
+        self.pdf_thread = threading.Thread(
+            target=self._crop_pdf_worker,
+            args=(input_path, output_path, top_crop),
             daemon=True,
         )
         self.pdf_thread.start()
